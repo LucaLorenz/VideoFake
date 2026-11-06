@@ -166,19 +166,82 @@ def prepare():
             "insightface.app.FaceAnalysis(name='buffalo_l', root=os.environ.get('VIDEOFAKE_MODEL_ROOT', '~/.insightface'), providers=")
         compile(source, str(analyser), 'exec')
         analyser.write_text(source)
+    # Avoid benchmarking every cuDNN convolution algorithm at first use.
+    options = ("provider_options=[{'cudnn_conv_algo_search': 'HEURISTIC'} "
+               "if p == 'CUDAExecutionProvider' else {} for p in roop.globals.execution_providers]")
+    for relative in ('roop/face_analyser.py', 'roop/processors/frame/face_swapper.py'):
+        path = PROJECT / relative
+        source = path.read_text()
+        updated = source.replace('providers=roop.globals.execution_providers)',
+                                 'providers=roop.globals.execution_providers, ' + options + ')')
+        compile(updated, str(path), 'exec')
+        if updated != source:
+            path.write_text(updated)
+    core = PROJECT / 'roop/core.py'
+    source = core.read_text()
+    updated = patched_core(source)
+    if updated != source:
+        core.write_text(updated)
+    utilities = PROJECT / 'roop/utilities.py'
+    source = utilities.read_text()
+    updated = patched_utilities(source)
+    if updated != source:
+        utilities.write_text(updated)
+
+
+def patched_utilities(source):
+    # r_frame_rate can be a stream timing base (e.g. 90000), not actual FPS.
+    replacement = '''def detect_fps(target_path: str) -> float:
+    import json
+    from fractions import Fraction
+    command = ['ffprobe', '-v', 'error', '-select_streams', 'v:0',
+               '-show_entries', 'stream=avg_frame_rate,r_frame_rate,nb_frames,duration',
+               '-of', 'json', target_path]
+    data = json.loads(subprocess.check_output(command, text=True))
+    streams = data.get('streams', [])
+    if not streams:
+        raise ValueError('Il file non contiene una traccia video leggibile.')
+    stream = streams[0]
+    rates = [stream.get('avg_frame_rate')]
+    try:
+        rates.append(str(Fraction(str(stream['nb_frames'])) / Fraction(str(stream['duration']))))
+    except (KeyError, ValueError, ZeroDivisionError):
+        pass
+    rates.append(stream.get('r_frame_rate'))
+    for rate in rates:
+        try:
+            fps = float(Fraction(str(rate)))
+            if 0 < fps <= 240:
+                return fps
+        except (ValueError, ZeroDivisionError):
+            pass
+    raise ValueError('Frame rate non valido o superiore a 240 fps: verifica il video prima di elaborarlo.')
+
+
+'''
+    result, count = re.subn(r'(?ms)^def detect_fps\(.*?(?=^def extract_frames\()',
+                            lambda match: replacement, source, count=1)
+    if count != 1:
+        raise RuntimeError('Funzione detect_fps inattesa: patch non applicata.')
+    compile(result, 'roop/utilities.py', 'exec')
+    return result
 
 
 def patched_core(source):
     # CLI must not import Tk; preload PyTorch before ONNX Runtime for CUDA.
     if '\nimport roop.ui as ui\n' not in source:
-        if '# videofake-colab-headless' in source:
-            return source
-        raise RuntimeError('core.py inatteso: patch non applicata.')
-    source = source.replace('\nimport onnxruntime\n', '\nimport torch\nimport onnxruntime\n')
-    source = source.replace('\nimport roop.ui as ui\n', '\nui = None  # videofake-colab-headless\n')
-    source = source.replace('def run() -> None:\n', 'def run() -> None:\n    global ui\n')
-    source = source.replace('        window = ui.init(start, destroy)',
-                            '        import roop.ui as ui\n        window = ui.init(start, destroy)')
+        if '# videofake-colab-headless' not in source:
+            raise RuntimeError('core.py inatteso: patch non applicata.')
+    else:
+        source = source.replace('\nimport onnxruntime\n', '\nimport torch\nimport onnxruntime\n')
+        source = source.replace('\nimport roop.ui as ui\n', '\nui = None  # videofake-colab-headless\n')
+        source = source.replace('def run() -> None:\n', 'def run() -> None:\n    global ui\n')
+        source = source.replace('        window = ui.init(start, destroy)',
+                                '        import roop.ui as ui\n        window = ui.init(start, destroy)')
+    # TensorFlow only configured its own unused GPU allocator here; neither
+    # the ONNX swapper nor the PyTorch enhancer needs it at runtime.
+    source = source.replace('\nimport tensorflow\n', '\n')
+    source = re.sub(r'(?ms)^    # prevent tensorflow memory leak\n.*?(?=^    # limit memory usage\n)', '', source)
     compile(source, 'roop/core.py', 'exec')
     return source
 
@@ -251,13 +314,13 @@ def setup():
 def arguments(config):
     args = [PYTHON, 'run.py', '--source', config['source'], '--target', config['target'],
             '--output', config['output'], '--execution-provider', config.get('Device', 'cuda'),
-            '--frame-processor', *config.get('Processor', 'face_swapper face_enhancer').split(),
+            '--frame-processor', *config.get('Processor', 'face_swapper').split(),
             '--output-video-encoder', config.get('VideoEncoder', 'libx264'),
             '--output-video-quality', str(config.get('VideoQuality', '18'))]
     for enabled, flag in [(config.get('KeepFPS', True), '--keep-fps'),
                           (not config.get('KeepAudio', True), '--skip-audio'),
                           (config.get('KeepFrames', False), '--keep-frames'),
-                          (config.get('ManyFaces', True), '--many-faces')]:
+                          (config.get('ManyFaces', False), '--many-faces')]:
         if enabled:
             args.append(flag)
     return args

@@ -29,6 +29,9 @@ class ColabTests(unittest.TestCase):
         self.assertNotIn('--skip-audio', args)
         self.assertIn('/tmp/a face.jpg', args)
         self.assertIn('--output-video-encoder', args)
+        self.assertNotIn('--many-faces', args)
+        processors = args[args.index('--frame-processor') + 1:args.index('--output-video-encoder')]
+        self.assertEqual(processors, ['face_swapper'])
         config['KeepAudio'] = False
         self.assertIn('--skip-audio', runner.arguments(config))
 
@@ -111,6 +114,22 @@ class ColabTests(unittest.TestCase):
                     runner.process(config)
             self.assertEqual(output.read_bytes(), b'result')
             self.assertEqual(video.read_bytes(), b'video')
+
+    def test_fps_uses_average_instead_of_90000_timing_base(self):
+        fixture = 'def detect_fps(target_path: str) -> float:\n    return 90000\n\ndef extract_frames():\n    pass\n'
+        patched = runner.patched_utilities(fixture)
+        self.assertEqual(patched, runner.patched_utilities(patched))
+        namespace = {'subprocess': __import__('subprocess')}
+        exec(patched, namespace)
+        cases = [({'avg_frame_rate': '30/1', 'r_frame_rate': '90000/1'}, 30),
+                 ({'avg_frame_rate': '30000/1001', 'r_frame_rate': '90000/1'}, 30000/1001),
+                 ({'avg_frame_rate': '0/0', 'r_frame_rate': '90000/1', 'nb_frames': '450', 'duration': '15'}, 30)]
+        for stream, expected in cases:
+            with patch('subprocess.check_output', return_value=json.dumps({'streams': [stream]})):
+                self.assertAlmostEqual(namespace['detect_fps']('video.mp4'), expected)
+        with patch('subprocess.check_output', return_value=json.dumps({'streams': [{'r_frame_rate': '90000/1'}]})):
+            with self.assertRaisesRegex(ValueError, 'Frame rate non valido'):
+                namespace['detect_fps']('video.mp4')
 
     def test_launcher_fetches_new_revision_on_every_call(self):
         notebook = json.loads((HERE / 'VideoFake_colab.ipynb').read_text())

@@ -17,8 +17,11 @@ if __name__ == '__main__':
     parser.add_argument('--source', default='/workspace/videofake-live/app/face.jpg')
     parser.add_argument('--target', default='/workspace/videofake-live/app/input_video.mp4')
     parser.add_argument('--output', default='/workspace/output/out.mp4')
-    parser.add_argument('--no-enhancer', action='store_true')
-    parser.add_argument('--single-face', action='store_true')
+    parser.add_argument('--enhancer', action='store_true')
+    parser.add_argument('--many-faces', action='store_true')
+    parser.add_argument('--no-enhancer', dest='enhancer', action='store_false', help=argparse.SUPPRESS)
+    parser.add_argument('--single-face', dest='many_faces', action='store_false', help=argparse.SUPPRESS)
+    parser.set_defaults(enhancer=False, many_faces=False)
     args = parser.parse_args()
     try:
         revision = subprocess.check_output(['git', '-C', str(Path(__file__).resolve().parent),
@@ -27,6 +30,6 @@ if __name__ == '__main__':
         revision = 'local'
     colab_runner.run_step(args.step, revision, {
         'source': args.source, 'target': args.target, 'output': args.output,
-        'Processor': 'face_swapper' if args.no_enhancer else 'face_swapper face_enhancer',
-        'ManyFaces': not args.single_face,
+        'Processor': 'face_swapper face_enhancer' if args.enhancer else 'face_swapper',
+        'ManyFaces': args.many_faces,
     })
