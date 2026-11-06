@@ -8,6 +8,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import traceback
 import urllib.request
@@ -142,6 +143,7 @@ def run_env():
     # Colab's inline backend belongs to its kernel, not the isolated CLI env.
     env['MPLBACKEND'] = 'Agg'
     env['PYTHONUNBUFFERED'] = '1'
+    env['VIDEOFAKE_MODEL_ROOT'] = str(ROOT / 'insightface')
     return env
 
 
@@ -156,6 +158,14 @@ def prepare():
     if head != UPSTREAM:
         raise RuntimeError('Checkout inatteso: usa una nuova cartella VIDEOFAKE_HOME.')
     (PROJECT / 'models').mkdir(parents=True, exist_ok=True)
+    analyser = PROJECT / 'roop/face_analyser.py'
+    source = analyser.read_text()
+    old = "insightface.app.FaceAnalysis(name='buffalo_l', providers="
+    if old in source:
+        source = 'import os\n' + source.replace(old,
+            "insightface.app.FaceAnalysis(name='buffalo_l', root=os.environ.get('VIDEOFAKE_MODEL_ROOT', '~/.insightface'), providers=")
+        compile(source, str(analyser), 'exec')
+        analyser.write_text(source)
 
 
 def patched_core(source):
@@ -262,12 +272,28 @@ def process(config):
             raise FileNotFoundError(f'{name}: {config[name]}. Carica il file e correggi step 4.')
     if Path(config['output']).resolve() in (Path(config['source']).resolve(), Path(config['target']).resolve()):
         raise ValueError('Output deve essere diverso dai file di input.')
+    prepare()
     Path(config['output']).parent.mkdir(parents=True, exist_ok=True)
-    checked('Elaborazione in corso', arguments(config), live=True, env=run_env(), cwd=PROJECT)
-    result = Path(config['output'])
-    if not result.is_file() or result.stat().st_size == 0:
-        raise RuntimeError('Nessun output creato: consulta il rapporto DEBUG.')
-    print('Output:', result)
+    # Frame extraction creates many files. Keep them on the local container
+    # disk, rather than on Runpod's persistent network filesystem.
+    with tempfile.TemporaryDirectory(prefix='videofake-') as scratch:
+        scratch = Path(scratch)
+        local = dict(config)
+        for key in ('source', 'target'):
+            destination = scratch / (key + Path(config[key]).suffix)
+            shutil.copy2(config[key], destination)
+            local[key] = str(destination)
+        local['output'] = str(scratch / ('result' + Path(config['output']).suffix))
+        checked('Elaborazione in corso — frame sul disco locale', arguments(local), live=True, env=run_env(), cwd=PROJECT)
+        result = Path(local['output'])
+        if not result.is_file() or result.stat().st_size == 0:
+            raise RuntimeError('Nessun output creato: consulta il rapporto DEBUG.')
+        shutil.copy2(result, config['output'])
+        if config.get('KeepFrames', False) and (scratch / 'temp').is_dir():
+            kept = Path(config['output']).parent / (scratch.name + '-frames')
+            shutil.copytree(scratch / 'temp', kept)
+            print('Frame conservati:', kept)
+    print('Output:', config['output'])
 
 
 def tail(path, lines=24, chars=5000):
@@ -309,6 +335,7 @@ def present_status(report):
 
 def run_step(step, revision, config=None):
     global LOG
+    started = time.monotonic()
     ROOT.mkdir(parents=True, exist_ok=True)
     LOG = ROOT / f'{step}-{time.time_ns()}.log'
     LOG.touch()
@@ -333,6 +360,7 @@ def run_step(step, revision, config=None):
         report.update(status='error', error=f'{type(error).__name__}: {error}',
                       traceback=traceback.format_exc().splitlines()[-8:], log_tail=tail(LOG))
     report['log_file'] = str(LOG)
+    report['elapsed_seconds'] = round(time.monotonic() - started, 2)
     (ROOT / 'debug.json').write_text(json.dumps(report, ensure_ascii=False, indent=2))
     present_status(report)
     print('DEBUG_BEGIN\n' + json.dumps(report, ensure_ascii=False, indent=2) + '\nDEBUG_END')

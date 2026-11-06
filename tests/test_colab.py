@@ -93,6 +93,25 @@ class ColabTests(unittest.TestCase):
             self.assertIn('Progressing...', output.getvalue())
             self.assertIn('2frame/s', path.read_text())
 
+    def test_processing_uses_local_frames_and_persists_only_result(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / 'installed.json').write_text(json.dumps({'install_id': runner.INSTALL_ID}))
+            face, video, output = root / 'face.jpg', root / 'video.mp4', root / 'out.mp4'
+            face.write_bytes(b'face')
+            video.write_bytes(b'video')
+            config = {'source': str(face), 'target': str(video), 'output': str(output)}
+            def execute(label, args, **kwargs):
+                local_video = Path(args[args.index('--target') + 1])
+                self.assertNotEqual(local_video, video)
+                self.assertEqual(local_video.read_bytes(), b'video')
+                Path(args[args.index('--output') + 1]).write_bytes(b'result')
+            with patch.object(runner, 'ROOT', root), patch.object(runner, 'prepare'), patch.object(runner, 'checked', execute):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    runner.process(config)
+            self.assertEqual(output.read_bytes(), b'result')
+            self.assertEqual(video.read_bytes(), b'video')
+
     def test_launcher_fetches_new_revision_on_every_call(self):
         notebook = json.loads((HERE / 'VideoFake_colab.ipynb').read_text())
         tree = ast.parse(''.join(notebook['cells'][1]['source']))
