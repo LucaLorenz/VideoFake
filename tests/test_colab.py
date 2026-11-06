@@ -48,7 +48,12 @@ class ColabTests(unittest.TestCase):
                 runner.LOG.write_text(('verbose build output\n' * 10000) + 'ROOT CAUSE\n')
                 raise RuntimeError('install failed')
             with patch.object(runner, 'setup', fail), contextlib.redirect_stdout(io.StringIO()) as output:
-                report = runner.run_step('setup', 'a' * 40)
+                with contextlib.redirect_stderr(io.StringIO()) as error_output:
+                    with self.assertRaises(SystemExit):
+                        runner.run_step('setup', 'a' * 40)
+                report = json.loads((Path(folder) / 'debug.json').read_text())
+            self.assertIn('STEP 3 FALLITO', error_output.getvalue())
+            self.assertIn('\033[1;31m', error_output.getvalue())
             self.assertEqual(report['status'], 'error')
             self.assertEqual(report['log_tail'][-1], 'ROOT CAUSE')
             self.assertLessEqual(len(report['log_tail']), 24)
@@ -73,7 +78,7 @@ class ColabTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, 'probe: processo terminato con codice 1') as caught:
                     runner.checked('probe', [__import__('sys').executable, '-c',
                                             'raise RuntimeError("long inline code")'])
-                self.assertNotIn('long inline code', str(caught.exception))
+                self.assertNotIn('raise RuntimeError(', str(caught.exception))
 
     def test_launcher_fetches_new_revision_on_every_call(self):
         notebook = json.loads((HERE / 'VideoFake_colab.ipynb').read_text())

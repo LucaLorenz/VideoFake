@@ -13,6 +13,8 @@ Il testo delle celle aperte non si sincronizza in tempo reale. Le celle sono com
 
 I rapporti riportano commit, step, errore e ultime righe del log. I log completi e `debug.json` restano in `/content/videofake-live/`. Non vengono inviati automaticamente a GitHub e non servono credenziali GitHub nel runtime. I file del runtime si perdono quando viene eliminato.
 
+Uno step fallito mostra un riquadro rosso con la causa e termina la cella in errore. Uno step riuscito mostra un riquadro verde. Non proseguire dopo un errore, anche se altri step sono ancora eseguibili.
+
 L'applicazione originale viene scaricata da `neuromodern/VideoFake` al commit `1b4f9f43d42de0b4a2d16ff58075464f676ba8dc`. CUDA/cuDNN di sistema non vengono reinstallati. Python 3.10 e le librerie CUDA 11.8 di PyTorch restano nell'ambiente separato.
 
 Correzioni incluse: compatibilità Python/NumPy, PyTorch/Torchvision fissati per GFPGAN, import GUI rinviato alla sola modalità desktop, opzione `--output-video-encoder`, encoder VP9 e significato di `KeepAudio`. I percorsi con spazi vengono passati senza shell.

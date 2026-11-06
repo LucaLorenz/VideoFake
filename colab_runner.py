@@ -1,5 +1,6 @@
 """Reloaded from GitHub for each Colab step; no browser or GitHub token needed."""
 import hashlib
+import html
 import json
 import os
 from pathlib import Path
@@ -35,6 +36,11 @@ scikit-image==0.21.0
 scikit-learn==1.3.2
 torch==2.0.1+cu118
 torchvision==0.15.2+cu118
+nvidia-cublas-cu11==11.11.3.6
+nvidia-cudnn-cu11==8.9.6.50
+nvidia-cuda-runtime-cu11==11.8.89
+nvidia-cufft-cu11==10.9.0.58
+nvidia-curand-cu11==10.3.0.86
 '''
 INSTALL_ID = hashlib.sha256(('python3.10-build1\n' + REQUIREMENTS).encode()).hexdigest()
 LOG = None
@@ -51,12 +57,13 @@ def checked(label, args, **kwargs):
                            stderr=subprocess.STDOUT, **kwargs)
         except subprocess.CalledProcessError as error:
             # Do not echo a whole inline Python probe into the short report.
-            raise RuntimeError(f'{label}: processo terminato con codice {error.returncode}') from None
+            cause = next((line.strip() for line in reversed(tail(LOG)) if line.strip()), '')
+            raise RuntimeError(f'{label}: processo terminato con codice {error.returncode}. {cause}') from None
 
 
 def run_env():
     site = ENV / 'lib/python3.10/site-packages'
-    libs = [str(site / 'torch/lib')] + [str(p) for p in (site / 'nvidia').glob('*/lib')]
+    libs = [str(p) for p in sorted((site / 'nvidia').glob('*/lib'))] + [str(site / 'torch/lib')]
     env = os.environ.copy()
     env['LD_LIBRARY_PATH'] = ':'.join(libs + [env.get('LD_LIBRARY_PATH', '')])
     env['PATH'] = str(ENV / 'bin') + ':' + env.get('PATH', '')
@@ -96,12 +103,20 @@ def patched_core(source):
 
 def verify():
     probe = '''
-import os, torch, numpy as np, onnx, onnxruntime as ort
+import os, ctypes
+require_gpu = os.environ.get('VIDEOFAKE_REQUIRE_GPU', '1') == '1'
+if require_gpu:
+    for library in ['libcudart.so.11.0', 'libcublasLt.so.11', 'libcublas.so.11',
+                    'libcudnn.so.8', 'libcufft.so.10', 'libcurand.so.10']:
+        try:
+            ctypes.CDLL(library, mode=ctypes.RTLD_GLOBAL)
+        except OSError as error:
+            raise RuntimeError(f'Libreria CUDA non caricabile: {library}: {error}') from None
+import torch, numpy as np, onnx, onnxruntime as ort
 from onnx import helper, TensorProto
 import roop.core
 from roop.processors.frame.core import get_frame_processors_modules
 get_frame_processors_modules(['face_swapper', 'face_enhancer'])
-require_gpu = os.environ.get('VIDEOFAKE_REQUIRE_GPU', '1') == '1'
 if require_gpu and not torch.cuda.is_available():
     raise RuntimeError('GPU non disponibile: scegli runtime T4 e riprova.')
 provider = 'CUDAExecutionProvider' if require_gpu else 'CPUExecutionProvider'
@@ -189,7 +204,35 @@ def tail(path, lines=24, chars=5000):
     with path.open('rb') as stream:
         stream.seek(max(0, path.stat().st_size - 24000))
         text = stream.read().decode('utf-8', errors='replace')
+    # Keep the failing command's output, without unrelated pip messages.
+    if '\n--- ' in text:
+        text = text.rsplit('\n--- ', 1)[1]
     return text[-chars:].splitlines()[-lines:]
+
+
+def present_status(report):
+    failed = report['status'] == 'error'
+    number = {'diagnose': '0', 'repo': '1', 'folders': '2', 'setup': '3', 'run': '5'}.get(report['step'], report['step'])
+    title = f"STEP {number} {'FALLITO — FERMATI QUI' if failed else 'COMPLETATO'}"
+    detail = report.get('error', 'Puoi passare allo step successivo.')
+    color, background = ('#fca5a5', '#450a0a') if failed else ('#86efac', '#052e16')
+    markup = (f'<div role="alert" style="border:3px solid {color};background:{background};'
+              f'color:{color};padding:16px;margin:12px 0;border-radius:8px;font-size:16px">'
+              f'<strong style="font-size:22px">{html.escape(title)}</strong>'
+              f'<pre style="white-space:pre-wrap;color:inherit;margin-bottom:0">{html.escape(detail)}</pre></div>')
+    try:
+        from IPython import get_ipython
+        from IPython.display import HTML, display
+        shell = get_ipython()
+        if shell is not None:
+            # Keep step 6 accurate even when an older bootstrap is still open.
+            shell.user_ns['VF_DEBUG'] = report
+            display(HTML(markup))
+            return
+    except ImportError:
+        pass
+    ansi = '\033[1;31m' if failed else '\033[1;32m'
+    print(ansi + title + '\n' + detail + '\033[0m', file=sys.stderr, flush=True)
 
 
 def run_step(step, revision, config=None):
@@ -219,7 +262,11 @@ def run_step(step, revision, config=None):
                       traceback=traceback.format_exc().splitlines()[-8:], log_tail=tail(LOG))
     report['log_file'] = str(LOG)
     (ROOT / 'debug.json').write_text(json.dumps(report, ensure_ascii=False, indent=2))
+    present_status(report)
     print('DEBUG_BEGIN\n' + json.dumps(report, ensure_ascii=False, indent=2) + '\nDEBUG_END')
     if report['status'] == 'error':
         print('Fermati qui. Condividi soltanto il blocco DEBUG oppure salva il notebook con output su GitHub.')
+        # Older notebook bootstraps catch Exception. SystemExit still marks the
+        # cell as failed, without requiring the user to reload their notebook.
+        raise SystemExit(f"STEP {step} FALLITO: {report['error']}")
     return report
