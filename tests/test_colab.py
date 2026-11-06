@@ -3,6 +3,7 @@ import contextlib
 import importlib.util
 import io
 import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -58,6 +59,21 @@ class ColabTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder, patch.object(runner, 'ROOT', Path(folder)):
             with self.assertRaisesRegex(RuntimeError, 'step 3'):
                 runner.process({})
+
+    def test_colab_inline_backend_does_not_leak_into_cli(self):
+        backend = 'module://matplotlib_inline.backend_inline'
+        with patch.dict(os.environ, {'MPLBACKEND': backend}):
+            env = runner.run_env()
+            self.assertEqual(env['MPLBACKEND'], 'Agg')
+            self.assertEqual(os.environ['MPLBACKEND'], backend)
+
+    def test_process_error_does_not_echo_inline_code(self):
+        with tempfile.TemporaryDirectory() as folder:
+            with patch.object(runner, 'LOG', Path(folder) / 'process.log'):
+                with self.assertRaisesRegex(RuntimeError, 'probe: processo terminato con codice 1') as caught:
+                    runner.checked('probe', [__import__('sys').executable, '-c',
+                                            'raise RuntimeError("long inline code")'])
+                self.assertNotIn('long inline code', str(caught.exception))
 
     def test_launcher_fetches_new_revision_on_every_call(self):
         notebook = json.loads((HERE / 'VideoFake_colab.ipynb').read_text())

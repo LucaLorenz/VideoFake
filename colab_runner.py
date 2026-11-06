@@ -46,8 +46,12 @@ def checked(label, args, **kwargs):
     with LOG.open('a') as stream:
         stream.write('\n--- ' + label + ' ---\n')
         stream.flush()
-        subprocess.run([str(a) for a in args], check=True, stdout=stream,
-                       stderr=subprocess.STDOUT, **kwargs)
+        try:
+            subprocess.run([str(a) for a in args], check=True, stdout=stream,
+                           stderr=subprocess.STDOUT, **kwargs)
+        except subprocess.CalledProcessError as error:
+            # Do not echo a whole inline Python probe into the short report.
+            raise RuntimeError(f'{label}: processo terminato con codice {error.returncode}') from None
 
 
 def run_env():
@@ -57,6 +61,8 @@ def run_env():
     env['LD_LIBRARY_PATH'] = ':'.join(libs + [env.get('LD_LIBRARY_PATH', '')])
     env['PATH'] = str(ENV / 'bin') + ':' + env.get('PATH', '')
     env['TF_CPP_MIN_LOG_LEVEL'] = '2'
+    # Colab's inline backend belongs to its kernel, not the isolated CLI env.
+    env['MPLBACKEND'] = 'Agg'
     return env
 
 
