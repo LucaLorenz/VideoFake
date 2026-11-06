@@ -1,0 +1,219 @@
+"""Reloaded from GitHub for each Colab step; no browser or GitHub token needed."""
+import hashlib
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+import time
+import traceback
+import urllib.request
+
+ROOT = Path(os.environ.get('VIDEOFAKE_HOME', '/content/videofake-live'))
+REPO = ROOT / 'app'
+PROJECT = REPO / 'roop'
+ENV = ROOT / 'env'
+PYTHON = str(ENV / 'bin/python')
+UPSTREAM = '1b4f9f43d42de0b4a2d16ff58075464f676ba8dc'
+REQUIREMENTS = '''numpy==1.24.3
+opencv-python==4.8.0.76
+opencv-python-headless==4.8.0.76
+onnx==1.14.0
+insightface==0.7.3
+psutil==5.9.5
+pillow==10.0.0
+onnxruntime-gpu==1.15.1
+tensorflow-cpu==2.13.0
+protobuf==4.23.4
+tqdm==4.65.0
+gfpgan==1.3.8
+basicsr==1.4.2
+albumentations==1.3.1
+scipy==1.11.4
+scikit-image==0.21.0
+scikit-learn==1.3.2
+torch==2.0.1+cu118
+torchvision==0.15.2+cu118
+'''
+INSTALL_ID = hashlib.sha256(('python3.10-build1\n' + REQUIREMENTS).encode()).hexdigest()
+LOG = None
+
+
+def checked(label, args, **kwargs):
+    """Full output stays on the runtime; the notebook receives only error tails."""
+    print(label, flush=True)
+    with LOG.open('a') as stream:
+        stream.write('\n--- ' + label + ' ---\n')
+        stream.flush()
+        subprocess.run([str(a) for a in args], check=True, stdout=stream,
+                       stderr=subprocess.STDOUT, **kwargs)
+
+
+def run_env():
+    site = ENV / 'lib/python3.10/site-packages'
+    libs = [str(site / 'torch/lib')] + [str(p) for p in (site / 'nvidia').glob('*/lib')]
+    env = os.environ.copy()
+    env['LD_LIBRARY_PATH'] = ':'.join(libs + [env.get('LD_LIBRARY_PATH', '')])
+    env['PATH'] = str(ENV / 'bin') + ':' + env.get('PATH', '')
+    env['TF_CPP_MIN_LOG_LEVEL'] = '2'
+    return env
+
+
+def prepare():
+    if not (REPO / '.git').is_dir():
+        if REPO.exists():
+            raise RuntimeError(f'{REPO} esiste ma non è un checkout. Nessun file cancellato.')
+        checked('Scarico applicazione originale',
+                ['git', 'clone', '--no-checkout', 'https://github.com/neuromodern/VideoFake.git', REPO])
+        checked('Seleziono versione verificata', ['git', '-C', REPO, 'checkout', '--detach', UPSTREAM])
+    head = subprocess.check_output(['git', '-C', str(REPO), 'rev-parse', 'HEAD'], text=True).strip()
+    if head != UPSTREAM:
+        raise RuntimeError('Checkout inatteso: usa una nuova cartella VIDEOFAKE_HOME.')
+    (PROJECT / 'models').mkdir(parents=True, exist_ok=True)
+
+
+def patched_core(source):
+    # CLI must not import Tk; preload PyTorch before ONNX Runtime for CUDA.
+    if '\nimport roop.ui as ui\n' not in source:
+        if '# videofake-colab-headless' in source:
+            return source
+        raise RuntimeError('core.py inatteso: patch non applicata.')
+    source = source.replace('\nimport onnxruntime\n', '\nimport torch\nimport onnxruntime\n')
+    source = source.replace('\nimport roop.ui as ui\n', '\nui = None  # videofake-colab-headless\n')
+    source = source.replace('def run() -> None:\n', 'def run() -> None:\n    global ui\n')
+    source = source.replace('        window = ui.init(start, destroy)',
+                            '        import roop.ui as ui\n        window = ui.init(start, destroy)')
+    compile(source, 'roop/core.py', 'exec')
+    return source
+
+
+def verify():
+    probe = '''
+import os, torch, numpy as np, onnx, onnxruntime as ort
+from onnx import helper, TensorProto
+import roop.core
+from roop.processors.frame.core import get_frame_processors_modules
+get_frame_processors_modules(['face_swapper', 'face_enhancer'])
+require_gpu = os.environ.get('VIDEOFAKE_REQUIRE_GPU', '1') == '1'
+if require_gpu and not torch.cuda.is_available():
+    raise RuntimeError('GPU non disponibile: scegli runtime T4 e riprova.')
+provider = 'CUDAExecutionProvider' if require_gpu else 'CPUExecutionProvider'
+x = helper.make_tensor_value_info('x', TensorProto.FLOAT, [2, 2])
+y = helper.make_tensor_value_info('y', TensorProto.FLOAT, [2, 2])
+graph = helper.make_graph([helper.make_node('MatMul', ['x', 'x'], ['y'])], 'check', [x], [y])
+model = helper.make_model(graph, opset_imports=[helper.make_opsetid('', 13)])
+model.ir_version = 8
+session = ort.InferenceSession(model.SerializeToString(), providers=[provider])
+if session.get_providers()[0] != provider:
+    raise RuntimeError('ONNX Runtime non riesce ad attivare ' + provider)
+np.testing.assert_allclose(session.run(None, {'x': np.eye(2, dtype=np.float32)})[0], np.eye(2))
+print('Python:', __import__('sys').version.split()[0], 'Provider:', provider)
+'''
+    checked('Controllo dipendenze', [PYTHON, '-m', 'pip', 'check'])
+    checked('Controllo import e inferenza ONNX', [PYTHON, '-c', probe], env=run_env(), cwd=PROJECT)
+    checked('Controllo avvio CLI', [PYTHON, 'run.py', '--help'], env=run_env(), cwd=PROJECT)
+
+
+def setup():
+    (ROOT / 'installed.json').unlink(missing_ok=True)
+    prepare()
+    if not shutil.which('ffmpeg') or not shutil.which('ffprobe'):
+        raise RuntimeError('ffmpeg/ffprobe mancanti nel runtime.')
+    tools = ROOT / 'tools'
+    if not (tools / 'uv').is_dir():
+        checked('Installo gestore Python separato', [sys.executable, '-m', 'pip', 'install',
+                '--target', tools, 'uv==0.9.5'])
+    tool_env = os.environ.copy()
+    tool_env['PYTHONPATH'] = str(tools)
+    if not (ENV / 'bin/python').exists():
+        checked('Creo ambiente Python 3.10', [sys.executable, '-m', 'uv', 'venv',
+                '--python', '3.10', '--seed', ENV], env=tool_env)
+    checked('Installo strumenti di compilazione', [PYTHON, '-m', 'pip', 'install',
+            'pip==24.3.1', 'setuptools==68.2.2', 'wheel==0.41.3',
+            'Cython==0.29.36', 'numpy==1.24.3'])
+    checked('Installo PyTorch CUDA compatibile', [PYTHON, '-m', 'pip', 'install',
+            'torch==2.0.1+cu118', 'torchvision==0.15.2+cu118',
+            '--index-url', 'https://download.pytorch.org/whl/cu118'])
+    req = ROOT / 'requirements-colab.txt'
+    req.write_text(REQUIREMENTS)
+    checked('Installo dipendenze applicazione', [PYTHON, '-m', 'pip', 'install',
+            '--no-build-isolation', '-r', req])
+    core = PROJECT / 'roop/core.py'
+    core.write_text(patched_core(core.read_text()))
+    verify()
+    (ROOT / 'installed.json').write_text(json.dumps({'install_id': INSTALL_ID}))
+
+
+def arguments(config):
+    args = [PYTHON, 'run.py', '--source', config['source'], '--target', config['target'],
+            '--output', config['output'], '--execution-provider', config.get('Device', 'cuda'),
+            '--frame-processor', *config.get('Processor', 'face_swapper face_enhancer').split(),
+            '--output-video-encoder', config.get('VideoEncoder', 'libx264'),
+            '--output-video-quality', str(config.get('VideoQuality', '18'))]
+    for enabled, flag in [(config.get('KeepFPS', True), '--keep-fps'),
+                          (not config.get('KeepAudio', True), '--skip-audio'),
+                          (config.get('KeepFrames', False), '--keep-frames'),
+                          (config.get('ManyFaces', True), '--many-faces')]:
+        if enabled:
+            args.append(flag)
+    return args
+
+
+def process(config):
+    marker = ROOT / 'installed.json'
+    if not marker.is_file() or json.loads(marker.read_text()).get('install_id') != INSTALL_ID:
+        raise RuntimeError('Ambiente assente o dipendenze cambiate: riesegui step 3.')
+    for name in ('source', 'target'):
+        if not Path(config[name]).is_file():
+            raise FileNotFoundError(f'{name}: {config[name]}. Carica il file e correggi step 4.')
+    if Path(config['output']).resolve() in (Path(config['source']).resolve(), Path(config['target']).resolve()):
+        raise ValueError('Output deve essere diverso dai file di input.')
+    Path(config['output']).parent.mkdir(parents=True, exist_ok=True)
+    checked('Elaborazione in corso; log completo nel runtime', arguments(config), env=run_env(), cwd=PROJECT)
+    result = Path(config['output'])
+    if not result.is_file() or result.stat().st_size == 0:
+        raise RuntimeError('Nessun output creato: consulta il rapporto DEBUG.')
+    print('Output:', result)
+
+
+def tail(path, lines=24, chars=5000):
+    if not path.is_file():
+        return []
+    with path.open('rb') as stream:
+        stream.seek(max(0, path.stat().st_size - 24000))
+        text = stream.read().decode('utf-8', errors='replace')
+    return text[-chars:].splitlines()[-lines:]
+
+
+def run_step(step, revision, config=None):
+    global LOG
+    ROOT.mkdir(parents=True, exist_ok=True)
+    LOG = ROOT / f'{step}-{time.time_ns()}.log'
+    LOG.touch()
+    report = {'revision': revision, 'step': step, 'status': 'ok',
+              'kernel_python': sys.version.split()[0]}
+    print(f'GitHub {revision[:12]} | step {step}', flush=True)
+    try:
+        if step == 'diagnose':
+            print('Kernel Colab:', sys.version.split()[0], '| applicazione: Python 3.10 separato')
+            if shutil.which('nvidia-smi'):
+                checked('Controllo GPU', ['nvidia-smi', '--query-gpu=name,driver_version', '--format=csv,noheader'])
+            print('Nessuna reinstallazione CUDA di sistema necessaria.')
+        elif step in ('repo', 'folders'):
+            prepare()
+        elif step == 'setup':
+            setup()
+        elif step == 'run':
+            process(config or {})
+        else:
+            raise ValueError('Step sconosciuto: ' + step)
+    except Exception as error:
+        report.update(status='error', error=f'{type(error).__name__}: {error}',
+                      traceback=traceback.format_exc().splitlines()[-8:], log_tail=tail(LOG))
+    report['log_file'] = str(LOG)
+    (ROOT / 'debug.json').write_text(json.dumps(report, ensure_ascii=False, indent=2))
+    print('DEBUG_BEGIN\n' + json.dumps(report, ensure_ascii=False, indent=2) + '\nDEBUG_END')
+    if report['status'] == 'error':
+        print('Fermati qui. Condividi soltanto il blocco DEBUG oppure salva il notebook con output su GitHub.')
+    return report

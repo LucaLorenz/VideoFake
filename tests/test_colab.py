@@ -1,0 +1,86 @@
+import ast
+import contextlib
+import importlib.util
+import io
+import json
+from pathlib import Path
+import tempfile
+import unittest
+from unittest.mock import patch
+
+HERE = Path(__file__).resolve().parents[1]
+spec = importlib.util.spec_from_file_location('runner', HERE / 'colab_runner.py')
+runner = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(runner)
+
+
+class ColabTests(unittest.TestCase):
+    def test_notebook_code_is_valid_python(self):
+        notebook = json.loads((HERE / 'VideoFake_colab.ipynb').read_text())
+        for cell in notebook['cells']:
+            if cell['cell_type'] == 'code':
+                ast.parse(''.join(cell['source']))
+                self.assertEqual(cell['outputs'], [])
+
+    def test_audio_and_paths_are_passed_correctly(self):
+        config = {'source': '/tmp/a face.jpg', 'target': '/tmp/a video.mp4', 'output': '/tmp/out.mp4'}
+        args = runner.arguments(config)
+        self.assertNotIn('--skip-audio', args)
+        self.assertIn('/tmp/a face.jpg', args)
+        self.assertIn('--output-video-encoder', args)
+        config['KeepAudio'] = False
+        self.assertIn('--skip-audio', runner.arguments(config))
+
+    def test_headless_patch_is_valid_and_idempotent(self):
+        source = ('import onnxruntime\nimport roop.ui as ui\n'
+                  'def run() -> None:\n    if True:\n        pass\n'
+                  '    else:\n        window = ui.init(start, destroy)\n')
+        patched = runner.patched_core('\n' + source)
+        ast.parse(patched)
+        self.assertLess(patched.index('import torch'), patched.index('import onnxruntime'))
+        self.assertEqual(patched, runner.patched_core(patched))
+        self.assertNotIn('\nimport roop.ui as ui\n', patched)
+
+    def test_error_report_is_short_and_saved(self):
+        with tempfile.TemporaryDirectory() as folder, patch.object(runner, 'ROOT', Path(folder)):
+            def fail():
+                runner.LOG.write_text(('verbose build output\n' * 10000) + 'ROOT CAUSE\n')
+                raise RuntimeError('install failed')
+            with patch.object(runner, 'setup', fail), contextlib.redirect_stdout(io.StringIO()) as output:
+                report = runner.run_step('setup', 'a' * 40)
+            self.assertEqual(report['status'], 'error')
+            self.assertEqual(report['log_tail'][-1], 'ROOT CAUSE')
+            self.assertLessEqual(len(report['log_tail']), 24)
+            self.assertLess(len(output.getvalue()), 7000)
+            self.assertEqual(json.loads((Path(folder) / 'debug.json').read_text()), report)
+
+    def test_missing_environment_blocks_processing(self):
+        with tempfile.TemporaryDirectory() as folder, patch.object(runner, 'ROOT', Path(folder)):
+            with self.assertRaisesRegex(RuntimeError, 'step 3'):
+                runner.process({})
+
+    def test_launcher_fetches_new_revision_on_every_call(self):
+        notebook = json.loads((HERE / 'VideoFake_colab.ipynb').read_text())
+        tree = ast.parse(''.join(notebook['cells'][1]['source']))
+        tree.body.pop()  # Do not execute the initial diagnose call.
+        namespace = {}
+        exec(compile(tree, '<bootstrap>', 'exec'), namespace)
+        requests = []
+        def response(request, timeout):
+            url = request.full_url if hasattr(request, 'full_url') else request
+            requests.append(url)
+            if 'api.github.com' in url:
+                revision = 'a' * 40 if len(requests) == 1 else 'b' * 40
+                return io.BytesIO(json.dumps({'object': {'sha': revision}}).encode())
+            return io.BytesIO(b'def run_step(step, revision, config):\n return {"revision": revision}\n')
+        with patch('urllib.request.urlopen', response):
+            first = namespace['_vf_step']('setup')
+            second = namespace['_vf_step']('setup')
+        self.assertEqual(first['revision'], 'a' * 40)
+        self.assertEqual(second['revision'], 'b' * 40)
+        self.assertIn('/' + 'a' * 40 + '/colab_runner.py', requests[1])
+        self.assertIn('/' + 'b' * 40 + '/colab_runner.py', requests[3])
+
+
+if __name__ == '__main__':
+    unittest.main()
