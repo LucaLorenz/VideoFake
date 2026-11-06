@@ -3,6 +3,7 @@ import hashlib
 import html
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -46,15 +47,85 @@ INSTALL_ID = hashlib.sha256(('python3.10-build1\n' + REQUIREMENTS).encode()).hex
 LOG = None
 
 
-def checked(label, args, **kwargs):
+def live_command(args, stream, **kwargs):
+    """Stream frame progress to Jupyter or terminal, preserving the full log."""
+    handle = None
+    try:
+        from IPython import get_ipython
+        from IPython.display import HTML, display
+        if get_ipython() is not None:
+            handle = display(HTML('<b>Elaborazione avviata. Attendo il primo avanzamento…</b>'), display_id=True)
+    except ImportError:
+        pass
+    last_update = 0
+    stage = 'Preparazione'
+    pattern = re.compile(r'(\d+)%\|.*?\|\s*(\d+)/(\d+)\s*\[([^\]]+)\]')
+    process = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                               text=True, encoding='utf-8', errors='replace', **kwargs)
+    pending = ''
+    def emit(line):
+        nonlocal last_update, stage
+        if not line.strip():
+            return
+        if line.startswith('[ROOP.'):
+            stage = line.strip()
+        match = pattern.search(line)
+        if not match and not line.startswith('[ROOP.'):
+            return
+        now = time.monotonic()
+        if match and now - last_update < 1 and match.group(1) != '100':
+            return
+        last_update = now
+        if handle is not None:
+            content = '<b>' + html.escape(stage) + '</b><br>'
+            if match:
+                percent, done, total, timing = match.groups()
+                content += (f'<progress value="{percent}" max="100" style="width:95%;height:24px"></progress>'
+                            f'<br>{percent}% · {done}/{total} · {html.escape(timing)}')
+            else:
+                content += html.escape(line.strip())
+            handle.update(HTML(content))
+        else:
+            print(line.strip(), flush=True)
+    try:
+        for char in iter(lambda: process.stdout.read(1), ''):
+            stream.write(char)
+            if char in '\r\n':
+                stream.flush()
+                emit(pending)
+                pending = ''
+            else:
+                pending += char
+        if pending:
+            emit(pending)
+        code = process.wait()
+    except BaseException:
+        process.terminate()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
+        raise
+    finally:
+        process.stdout.close()
+    if code:
+        raise subprocess.CalledProcessError(code, args)
+
+
+def checked(label, args, live=False, **kwargs):
     """Full output stays on the runtime; the notebook receives only error tails."""
     print(label, flush=True)
     with LOG.open('a') as stream:
         stream.write('\n--- ' + label + ' ---\n')
         stream.flush()
         try:
-            subprocess.run([str(a) for a in args], check=True, stdout=stream,
-                           stderr=subprocess.STDOUT, **kwargs)
+            command = [str(a) for a in args]
+            if live:
+                live_command(command, stream, **kwargs)
+            else:
+                subprocess.run(command, check=True, stdout=stream,
+                               stderr=subprocess.STDOUT, **kwargs)
         except subprocess.CalledProcessError as error:
             # Do not echo a whole inline Python probe into the short report.
             cause = next((line.strip() for line in reversed(tail(LOG)) if line.strip()), '')
@@ -70,6 +141,7 @@ def run_env():
     env['TF_CPP_MIN_LOG_LEVEL'] = '2'
     # Colab's inline backend belongs to its kernel, not the isolated CLI env.
     env['MPLBACKEND'] = 'Agg'
+    env['PYTHONUNBUFFERED'] = '1'
     return env
 
 
@@ -191,7 +263,7 @@ def process(config):
     if Path(config['output']).resolve() in (Path(config['source']).resolve(), Path(config['target']).resolve()):
         raise ValueError('Output deve essere diverso dai file di input.')
     Path(config['output']).parent.mkdir(parents=True, exist_ok=True)
-    checked('Elaborazione in corso; log completo nel runtime', arguments(config), env=run_env(), cwd=PROJECT)
+    checked('Elaborazione in corso', arguments(config), live=True, env=run_env(), cwd=PROJECT)
     result = Path(config['output'])
     if not result.is_file() or result.stat().st_size == 0:
         raise RuntimeError('Nessun output creato: consulta il rapporto DEBUG.')

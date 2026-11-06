@@ -80,6 +80,19 @@ class ColabTests(unittest.TestCase):
                                             'raise RuntimeError("long inline code")'])
                 self.assertNotIn('raise RuntimeError(', str(caught.exception))
 
+    def test_live_progress_handles_carriage_returns_and_keeps_log(self):
+        code = ('import sys; '
+                'sys.stdout.write("[ROOP.FACE-SWAPPER] Progressing...\\n"); '
+                'sys.stdout.write("Processing: 100%|##########| 2/2 [00:01<00:00, 2frame/s]\\r"); '
+                'sys.stdout.flush()')
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'live.log'
+            with patch.object(runner, 'LOG', path), contextlib.redirect_stdout(io.StringIO()) as output:
+                runner.checked('live', [__import__('sys').executable, '-c', code], live=True)
+            self.assertIn('2/2', output.getvalue())
+            self.assertIn('Progressing...', output.getvalue())
+            self.assertIn('2frame/s', path.read_text())
+
     def test_launcher_fetches_new_revision_on_every_call(self):
         notebook = json.loads((HERE / 'VideoFake_colab.ipynb').read_text())
         tree = ast.parse(''.join(notebook['cells'][1]['source']))
