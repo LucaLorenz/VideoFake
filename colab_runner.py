@@ -223,6 +223,29 @@ def patched_utilities(source):
                             lambda match: replacement, source, count=1)
     if count != 1:
         raise RuntimeError('Funzione detect_fps inattesa: patch non applicata.')
+    if 'def detect_sar(' not in result:
+        result += '''
+
+def detect_sar(target_path: str) -> str:
+    import json
+    from fractions import Fraction
+    command = ['ffprobe', '-v', 'error', '-select_streams', 'v:0',
+               '-show_entries', 'stream=sample_aspect_ratio:stream_side_data=rotation',
+               '-of', 'json', target_path]
+    stream = json.loads(subprocess.check_output(command, text=True))['streams'][0]
+    try:
+        sar = Fraction(stream.get('sample_aspect_ratio', '1:1').replace(':', '/'))
+        if sar <= 0:
+            sar = Fraction(1)
+    except (ValueError, ZeroDivisionError):
+        sar = Fraction(1)
+    rotation = next((float(item['rotation']) for item in stream.get('side_data_list', []) if 'rotation' in item), 0)
+    if round(rotation) % 180:
+        sar = 1 / sar
+    return str(sar.numerator) + '/' + str(sar.denominator)
+'''
+    result = result.replace("'colorspace=bt709:iall=bt601-6-625:fast=1'",
+        "'colorspace=bt709:iall=bt601-6-625:fast=1,setsar=' + detect_sar(target_path) + ':max=65535'")
     compile(result, 'roop/utilities.py', 'exec')
     return result
 
