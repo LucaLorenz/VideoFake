@@ -16,6 +16,35 @@ spec.loader.exec_module(runner)
 
 
 class ColabTests(unittest.TestCase):
+    def test_lean_profile_removes_only_unused_tensorflow_dependency(self):
+        with patch.dict(os.environ, {'VIDEOFAKE_INSTALL_PROFILE': 'lean'}):
+            fresh_spec = importlib.util.spec_from_file_location('lean_runner', HERE / 'colab_runner.py')
+            lean = importlib.util.module_from_spec(fresh_spec)
+            fresh_spec.loader.exec_module(lean)
+        self.assertNotIn('tensorflow-cpu', lean.REQUIREMENTS)
+        self.assertIn('onnxruntime-gpu==1.15.1', lean.REQUIREMENTS)
+        self.assertIn('gfpgan==1.3.8', lean.REQUIREMENTS)
+        self.assertIn('tensorflow-cpu', runner.REQUIREMENTS)
+
+    def test_model_preparation_reuses_complete_downloads(self):
+        fresh_spec = importlib.util.spec_from_file_location('assets', HERE / 'prepare_models.py')
+        assets = importlib.util.module_from_spec(fresh_spec)
+        fresh_spec.loader.exec_module(assets)
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            models = root / 'app/roop/models'
+            models.mkdir(parents=True)
+            for name, size in [('inswapper_128.onnx', 554253681), ('GFPGANv1.4.pth', 348632874)]:
+                with (models / name).open('wb') as stream:
+                    stream.truncate(size)
+            face_models = root / 'insightface/models/buffalo_l'
+            face_models.mkdir(parents=True)
+            for name in ('1k3d68.onnx', '2d106det.onnx', 'det_10g.onnx', 'genderage.onnx', 'w600k_r50.onnx'):
+                (face_models / name).write_bytes(b'model')
+            with patch.dict(os.environ, {'VIDEOFAKE_HOME': folder}), patch('urllib.request.urlopen', side_effect=AssertionError('unexpected download')):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    assets.prepare_models()
+
     def test_notebook_code_is_valid_python(self):
         notebook = json.loads((HERE / 'VideoFake_colab.ipynb').read_text())
         for cell in notebook['cells']:

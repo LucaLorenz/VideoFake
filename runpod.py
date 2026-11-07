@@ -1,12 +1,17 @@
 """Run the shared VideoFake pipeline on a persistent Runpod workspace."""
 import argparse
+import json
 import os
 from pathlib import Path
 import subprocess
 
-os.environ.setdefault('VIDEOFAKE_HOME', '/workspace/videofake-live')
-os.environ.setdefault('UV_PYTHON_INSTALL_DIR', '/workspace/videofake-live/python')
-os.environ.setdefault('UV_CACHE_DIR', '/workspace/videofake-live/uv-cache')
+settings = Path(__file__).resolve().parent / '.runtime.json'
+settings = json.loads(settings.read_text()) if settings.is_file() else {}
+runtime = settings.get('runtime', '/workspace/videofake-live')
+os.environ.setdefault('VIDEOFAKE_HOME', runtime)
+os.environ.setdefault('VIDEOFAKE_INSTALL_PROFILE', settings.get('profile', 'legacy'))
+os.environ.setdefault('UV_PYTHON_INSTALL_DIR', str(Path(runtime) / 'python'))
+os.environ.setdefault('UV_CACHE_DIR', str(Path(runtime) / 'uv-cache'))
 os.environ.setdefault('PIP_NO_CACHE_DIR', '1')
 
 import colab_runner
@@ -14,8 +19,8 @@ import colab_runner
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('step', choices=['diagnose', 'repo', 'folders', 'setup', 'run'])
-    parser.add_argument('--source', default='/workspace/videofake-live/app/face.jpg')
-    parser.add_argument('--target', default='/workspace/videofake-live/app/input_video.mp4')
+    parser.add_argument('--source', default='/workspace/input/face.jpg')
+    parser.add_argument('--target', default='/workspace/input/input_video.mp4')
     parser.add_argument('--output', default='/workspace/output/out.mp4')
     parser.add_argument('--enhancer', action='store_true')
     parser.add_argument('--many-faces', action='store_true')

@@ -44,6 +44,10 @@ nvidia-cuda-runtime-cu11==11.8.89
 nvidia-cufft-cu11==10.9.0.58
 nvidia-curand-cu11==10.3.0.86
 '''
+# Fresh disposable Pods don't need TensorFlow: the CLI patch below removes
+# its unused allocator setup. Keep existing installations compatible by default.
+if os.environ.get('VIDEOFAKE_INSTALL_PROFILE') == 'lean':
+    REQUIREMENTS = REQUIREMENTS.replace('tensorflow-cpu==2.13.0\n', '')
 INSTALL_ID = hashlib.sha256(('python3.10-build1\n' + REQUIREMENTS).encode()).hexdigest()
 LOG = None
 

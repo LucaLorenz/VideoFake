@@ -1,30 +1,59 @@
-# VideoFake: GitHub → Colab
+# VideoFake: nuovo Pod → un comando → notebook pronto
 
-[Apri in Colab](https://colab.research.google.com/github/LucaLorenz/VideoFake/blob/main/VideoFake_colab.ipynb)
+Codice, installer e notebook sono in questa repo. Non occorre copiare il vecchio Pod, costruire immagini Docker o acquistare storage persistente. I modelli vengono scaricati automaticamente dai rispettivi hosting.
 
-Il notebook è un launcher. `colab_runner.py` contiene installazione, controlli e avvio: **viene scaricato dall'ultimo commit di `main` a ogni esecuzione degli step 0, 1, 2, 3 e 5**. La revisione viene risolta prima del download: il codice eseguito corrisponde al commit stampato nell'output.
+## Nuovo Pod
 
-1. La prima volta riapri il notebook dal link sopra e seleziona GPU T4.
-2. Esegui gli step da 0 a 5. Lo step 3 crea Python 3.10 separato, installa le dipendenze e verifica gli import e una piccola inferenza ONNX sulla GPU. La prima installazione richiede diversi minuti.
-3. Dopo una modifica nella repo, riesegui lo step indicato: non serve ricopiare il codice o ricaricare la pagina. Se cambiano le dipendenze, riesegui lo step 3.
-4. In caso di errore fermati. Incolla nella chat soltanto il blocco `DEBUG_BEGIN … DEBUG_END`. In alternativa salva il notebook con gli output nella stessa repo, tramite **File → Salva una copia in GitHub**, poi scrivi “controlla”. Verifica che gli output siano inclusi nel salvataggio.
+1. Crea un Pod NVIDIA con template ufficiale **Runpod PyTorch**, **JupyterLab** attivo e **50 GB di container disk**. Non serve un volume persistente. Stack compatibile con A40, RTX A5000/A6000, RTX 3090/4090. RTX 50/Blackwell richiedono un ambiente più recente e vengono bloccate prima di installare.
+2. Apri il terminale del Pod ed esegui:
 
-Il testo delle celle aperte non si sincronizza in tempo reale. Le celle sono comandi di avvio stabili; gli aggiornamenti riguardano il codice che scaricano. Se cambia il launcher stesso, occorre riaprire il notebook una volta.
+```bash
+curl -fsSL https://raw.githubusercontent.com/LucaLorenz/VideoFake/main/bootstrap_runpod.sh -o /tmp/videofake-install.sh && bash /tmp/videofake-install.sh
+```
 
-I rapporti riportano commit, step, errore e ultime righe del log. I log completi e `debug.json` restano in `/content/videofake-live/`. Non vengono inviati automaticamente a GitHub e non servono credenziali GitHub nel runtime. I file del runtime si perdono quando viene eliminato.
+3. Attendi **PRONTO**. Lo script scarica il progetto, crea Python 3.10 separato, installa le dipendenze, verifica CUDA e scarica i modelli. **Non avvia test video.** Se fallisce si ferma con errore visibile.
+4. In JupyterLab apri **`/workspace/VideoFake-tools/Runpod_VideoFake.ipynb`**.
+5. Carica foto e video in **`/workspace/input`**. Esegui **0**, configura i percorsi nello **step 4**, poi esegui **5**. Salta 1–3: installazione già completata.
+6. Scarica i risultati da **`/workspace/output`**. Poi puoi eliminare il Pod dopo aver salvato ciò che ti interessa.
 
-Uno step fallito mostra un riquadro rosso con la causa e termina la cella in errore. Uno step riuscito mostra un riquadro verde. Non proseguire dopo un errore, anche se altri step sono ancora eseguibili.
+Su qualsiasi nuovo Pod compatibile ripeti gli stessi passaggi. Nessun dato del vecchio Pod è necessario.
 
-L'applicazione originale viene scaricata da `neuromodern/VideoFake` al commit `1b4f9f43d42de0b4a2d16ff58075464f676ba8dc`. CUDA/cuDNN di sistema non vengono reinstallati. Python 3.10 e le librerie CUDA 11.8 di PyTorch restano nell'ambiente separato.
+## Installazione
 
-Correzioni incluse: compatibilità Python/NumPy, PyTorch/Torchvision fissati per GFPGAN, import GUI rinviato alla sola modalità desktop, opzione `--output-video-encoder`, encoder VP9 e significato di `KeepAudio`. I percorsi con spazi vengono passati senza shell.
+- Codice e notebook: `/workspace/VideoFake-tools`.
+- Python, librerie e modelli: `/opt/videofake`, sul disco locale del container. Evita l'installazione lenta di migliaia di file su storage di rete.
+- Configurazione automatica: `.runtime.json`, letta dal notebook e da `runpod.py`.
+- Modelli: circa 1,2 GB di download; vengono controllati e riutilizzati se già presenti.
+- Input e risultati: `/workspace/input` e `/workspace/output`.
 
-Controlli locali: `python3 -m unittest discover -s tests -v`. Questi controlli non sostituiscono la verifica GPU dello step 3 su Colab.
+**Senza storage persistente, arresto/eliminazione può cancellare i file. Scarica i risultati prima.** L'ambiente è ricreabile dalla repo.
 
-## Runpod
+L'obiettivo è un avvio di pochi minuti, ma il tempo non è garantito: dipende da download, CPU, disco e disponibilità GPU. Non occorre tenere acceso il vecchio Pod.
 
-Nel Pod, clona la repo in `/workspace/VideoFake-tools`. Lancia `python runpod.py setup` una volta per installare e verificare l'ambiente. Apri `Runpod_VideoFake.ipynb` in JupyterLab, esegui 0, poi 4 e 5. Carica gli input in `/workspace/input`; i risultati vanno in `/workspace/output`.
+L'installer è rieseguibile: se l'ambiente è completo, verifica soltanto dipendenze, GPU e modelli. Non sovrascrive notebook modificati e non aggiorna automaticamente un checkout esistente.
 
-Da terminale: `python runpod.py run --source /workspace/input/face.jpg --target /workspace/input/video.mp4 --output /workspace/output/out.mp4`. Aggiungi `--no-enhancer` per una prova con il solo swap.
+## Uso
 
-L'elaborazione mostra il progresso in Jupyter o nel terminale; il log completo resta sul Pod. Per aggiornare il checkout: `git pull --ff-only`. Dipendenze, interprete gestito e modelli sono in `/workspace/videofake-live`.
+Gli step del notebook scaricano il runner dall'ultimo commit di `main` a ogni Esegui. Se cambiano le dipendenze, chiedono di rieseguire lo step 3.
+
+I nuovi notebook partono con **solo swap e un solo volto**. Per aggiungere l'enhancer usa `Processor = "face_swapper face_enhancer"`. Progresso, frame e tempo stimato sono visibili. Dimensioni e proporzioni sono ricavate dinamicamente dall'input; i metadati FPS anomali non vengono usati come frame rate.
+
+Da terminale, nella cartella progetto:
+
+```bash
+python3 runpod.py run --source /workspace/input/face.jpg --target /workspace/input/input_video.mp4 --output /workspace/output/out.mp4
+```
+
+Aggiungi `--enhancer` o `--many-faces` solo se desiderato. Per aggiornare un checkout senza modifiche locali: `git pull --ff-only`.
+
+## Errori e verifiche
+
+Gli errori mostrano un riquadro rosso e fanno fallire la cella. Condividi soltanto `DEBUG_BEGIN … DEBUG_END`. I log completi restano nel runtime. Nessuna chiave GitHub richiesta e nessun invio automatico dei rapporti.
+
+Controlli software: `python3 -m unittest discover -s tests -v`. I test video restano manuali.
+
+## Colab e ambienti precedenti
+
+[Apri Colab](https://colab.research.google.com/github/LucaLorenz/VideoFake/blob/main/VideoFake_colab.ipynb). Senza `.runtime.json`, i Pod precedenti usano il profilo originale. L'installer non sposta o cancella vecchi ambienti.
+
+Basato su [VideoFake di NeuroModern](https://github.com/neuromodern/VideoFake), commit applicativo `1b4f9f43d42de0b4a2d16ff58075464f676ba8dc`.
