@@ -311,8 +311,10 @@ def setup():
     checked('Installo strumenti di compilazione', [PYTHON, '-m', 'pip', 'install',
             'pip==24.3.1', 'setuptools==68.2.2', 'wheel==0.41.3',
             'Cython==0.29.36', 'numpy==1.24.3'])
+    cached_torch = ROOT / 'wheels/torch-2.0.1+cu118-cp310-cp310-linux_x86_64.whl'
+    torch_package = str(cached_torch) if cached_torch.is_file() else 'torch==2.0.1+cu118'
     checked('Installo PyTorch CUDA compatibile', [PYTHON, '-m', 'pip', 'install',
-            'torch==2.0.1+cu118', 'torchvision==0.15.2+cu118',
+            torch_package, 'torchvision==0.15.2+cu118',
             '--index-url', 'https://download.pytorch.org/whl/cu118'])
     req = ROOT / 'requirements-colab.txt'
     req.write_text(REQUIREMENTS)

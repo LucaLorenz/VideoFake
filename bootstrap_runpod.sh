@@ -50,6 +50,7 @@ export PIP_NO_CACHE_DIR=1
 export PYTHONUNBUFFERED=1
 
 cd "$project_dir"
+python3 download_torch.py
 python3 - "$runtime_dir" <<'PY'
 import json, os, sys
 from pathlib import Path

@@ -1,5 +1,6 @@
 import ast
 import contextlib
+import hashlib
 import importlib.util
 import io
 import json
@@ -44,6 +45,28 @@ class ColabTests(unittest.TestCase):
             with patch.dict(os.environ, {'VIDEOFAKE_HOME': folder}), patch('urllib.request.urlopen', side_effect=AssertionError('unexpected download')):
                 with contextlib.redirect_stdout(io.StringIO()):
                     assets.prepare_models()
+
+    def test_parallel_wheel_download_checks_official_digest(self):
+        module_spec = importlib.util.spec_from_file_location('wheel_download', HERE / 'download_torch.py')
+        module = importlib.util.module_from_spec(module_spec)
+        module_spec.loader.exec_module(module)
+        body = b'pinned-wheel-content' * 100
+        digest = hashlib.sha256(body).hexdigest()
+        name = 'torch-2.0.1+cu118-cp310-cp310-linux_x86_64.whl'
+        def response(request, timeout):
+            if isinstance(request, str):
+                return io.BytesIO(f'<a href="https://example.invalid/{name}#sha256={digest}">wheel</a>'.encode())
+            bounds = request.headers['Range'].split('=')[1]
+            begin, end = map(int, bounds.split('-'))
+            result = io.BytesIO(body[begin:end+1])
+            result.status = 206
+            result.headers = {'Content-Range': f'bytes {begin}-{end}/{len(body)}'}
+            return result
+        with tempfile.TemporaryDirectory() as folder, patch.dict(os.environ, {'VIDEOFAKE_HOME': folder}):
+            with patch('urllib.request.urlopen', response), patch.object(__import__('sys'), 'argv', ['download_torch.py']):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    module.download()
+            self.assertEqual((Path(folder) / 'wheels' / name).read_bytes(), body)
 
     def test_notebook_code_is_valid_python(self):
         notebook = json.loads((HERE / 'VideoFake_colab.ipynb').read_text())
