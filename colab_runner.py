@@ -313,13 +313,24 @@ def setup():
             'Cython==0.29.36', 'numpy==1.24.3'])
     cached_torch = ROOT / 'wheels/torch-2.0.1+cu118-cp310-cp310-linux_x86_64.whl'
     torch_package = str(cached_torch) if cached_torch.is_file() else 'torch==2.0.1+cu118'
-    checked('Installo PyTorch CUDA compatibile', [PYTHON, '-m', 'pip', 'install',
-            torch_package, 'torchvision==0.15.2+cu118',
-            '--index-url', 'https://download.pytorch.org/whl/cu118'])
+    if os.environ.get('VIDEOFAKE_INSTALL_PROFILE') == 'lean':
+        checked('Installo PyTorch CUDA compatibile', [sys.executable, '-m', 'uv', 'pip', 'install',
+                '--python', PYTHON, torch_package, 'torchvision==0.15.2+cu118',
+                '--index-url', 'https://download.pytorch.org/whl/cu118'], env=tool_env)
+    else:
+        checked('Installo PyTorch CUDA compatibile', [PYTHON, '-m', 'pip', 'install',
+                torch_package, 'torchvision==0.15.2+cu118',
+                '--index-url', 'https://download.pytorch.org/whl/cu118'])
     req = ROOT / 'requirements-colab.txt'
     req.write_text(REQUIREMENTS)
-    checked('Installo dipendenze applicazione', [PYTHON, '-m', 'pip', 'install',
-            '--no-build-isolation', '-r', req])
+    if os.environ.get('VIDEOFAKE_INSTALL_PROFILE') == 'lean':
+        checked('Installo dipendenze applicazione in parallelo', [sys.executable, '-m', 'uv', 'pip', 'install',
+                '--python', PYTHON, '--no-build-isolation', '-r', req,
+                '--extra-index-url', 'https://download.pytorch.org/whl/cu118',
+                '--index-strategy', 'unsafe-best-match'], env=tool_env)
+    else:
+        checked('Installo dipendenze applicazione', [PYTHON, '-m', 'pip', 'install',
+                '--no-build-isolation', '-r', req])
     core = PROJECT / 'roop/core.py'
     core.write_text(patched_core(core.read_text()))
     verify()
